@@ -124,39 +124,6 @@ def extrair_ultimo_scan(df, col_scan=None, n_scans_esperado=3):
 
 
 
-def calcular_scan_rate_automatico(df_ultimo, col_e, pontos_por_segundo=10.0):
-    """Estima a velocidade de varredura a partir do ΔE entre pontos.
-
-    Os arquivos do equipamento analisados não exportam tempo. Neles, o intervalo
-    entre pontos é proporcional ao scan rate e a aquisição corresponde a
-    aproximadamente 10 pontos/s. Usa a mediana de |ΔE| para reduzir a influência
-    de pontos de retorno/transições.
-    """
-    x = pd.to_numeric(df_ultimo[col_e], errors="coerce").dropna().to_numpy(dtype=float)
-    if len(x) < 3:
-        return np.nan, np.nan
-
-    dx_mV = np.abs(np.diff(x)) * 1000.0
-    dx_mV = dx_mV[np.isfinite(dx_mV) & (dx_mV > 0)]
-    if len(dx_mV) == 0:
-        return np.nan, np.nan
-
-    delta_mV = float(np.median(dx_mV))
-    vel_calculada = delta_mV * float(pontos_por_segundo)
-
-    # As pequenas oscilações/limitações de resolução do equipamento podem fazer
-    # uma velocidade nominal de 60 mV/s aparecer como 59,x mV/s. Velocidades
-    # estimadas a até 1,5 mV/s de um múltiplo de 5 são ajustadas ao valor nominal.
-    # Fora dessa tolerância, preserva-se uma casa decimal da estimativa.
-    multiplo_5 = round(vel_calculada / 5.0) * 5.0
-    if abs(vel_calculada - multiplo_5) <= 1.5:
-        vel_mV_s = multiplo_5
-    else:
-        vel_mV_s = round(vel_calculada, 1)
-
-    return vel_mV_s, delta_mV
-
-
 def calcular_potencial_extracao(x):
     """
     Calcula automaticamente o potencial de extração (ponto médio da janela de
@@ -341,14 +308,6 @@ if not arquivos:
     st.stop()
 
 # ============================================================================
-# ABAS
-# ============================================================================
-
-tab_resultados, tab_graficos = st.tabs(
-    ["📊 Dados e resultados", "📈 Gráficos"]
-)
-
-# ============================================================================
 # PROCESSAMENTO DOS ARQUIVOS
 # ============================================================================
 # Essa parte continua com a mesma lógica do código original.
@@ -423,10 +382,6 @@ with st.sidebar:
 
         df_ultimo, _ = extrair_ultimo_scan(df_completo, col_scan_usar, n_scans_global)
 
-        # calcula o scan rate automaticamente
-        vel_auto, _ = calcular_scan_rate_automatico(df_ultimo, col_e_global, pontos_por_segundo=10.0)
-        vel = float(vel_auto) if np.isfinite(vel_auto) else np.nan
-
         # potencial de extração
         try:
             x_tab = df_ultimo[col_e_global].astype(float).to_numpy()
@@ -460,10 +415,72 @@ with st.sidebar:
                 "df": df_ultimo,
                 "col_e": col_e_global,
                 "col_i": col_i_global,
-                "vel": vel,
+                "vel": np.nan,
                 "pot_extracao": pot_extracao,
             }
         )
+
+# ============================================================================
+# VELOCIDADES DE VARREDURA
+# ============================================================================
+
+st.header("⚡ Informar velocidades de varredura")
+st.write(
+    "Informe a velocidade correspondente a cada arquivo. O step de potencial "
+    "não permite calcular a velocidade sem o tempo de aquisição."
+)
+
+with st.form("form_velocidades"):
+    velocidades_informadas = []
+    for indice, cfg in enumerate(configs):
+        velocidade = st.number_input(
+            f"{cfg['nome']} — velocidade de varredura (mV/s)",
+            min_value=0.0,
+            value=None,
+            step=1.0,
+            format="%.6g",
+            key=f"velocidade_varredura_{indice}",
+            placeholder="Obrigatório",
+        )
+        velocidades_informadas.append(velocidade)
+
+    velocidades_confirmadas = st.form_submit_button(
+        "Confirmar velocidades e analisar",
+        type="primary",
+    )
+
+assinatura_arquivos = tuple((arq.name, arq.size) for arq in arquivos)
+valores_velocidade_validos = (
+    len(configs) == len(arquivos)
+    and all(v is not None and np.isfinite(v) and v > 0 for v in velocidades_informadas)
+)
+
+if velocidades_confirmadas and valores_velocidade_validos:
+    st.session_state["velocidades_confirmadas_para"] = assinatura_arquivos
+
+velocidades_validas = (
+    valores_velocidade_validos
+    and st.session_state.get("velocidades_confirmadas_para") == assinatura_arquivos
+)
+
+if not velocidades_validas:
+    st.session_state["calculado"] = False
+    if velocidades_confirmadas:
+        st.error("Informe uma velocidade maior que zero para cada arquivo antes de continuar.")
+    else:
+        st.info("Preencha e confirme todas as velocidades para liberar a análise.")
+    st.stop()
+
+for cfg, velocidade in zip(configs, velocidades_informadas):
+    cfg["vel"] = float(velocidade)
+
+# ============================================================================
+# ABAS
+# ============================================================================
+
+tab_resultados, tab_graficos = st.tabs(
+    ["📊 Dados e resultados", "📈 Gráficos"]
+)
 
 # ============================================================================
 # CÁLCULO
