@@ -81,20 +81,23 @@ def detectar_coluna_scan(df):
     """Tenta encontrar uma coluna que identifique o número do scan/ciclo."""
     for c in df.columns:
         cl = str(c).lower()
-        if "cycle" in cl or "scan" in cl or "segment" in cl:
+        # "Segment" normalmente identifica apenas um ramo (ida ou volta), não
+        # um ciclo completo; filtrá-lo eliminaria Ia ou Ic.
+        if "cycle" in cl or "scan" in cl:
             return c
     return None
 
 
-def extrair_ultimo_scan(df, col_scan=None, n_scans_esperado=3):
+def extrair_ultimo_scan(df, col_scan=None, n_scans_esperado=3,
+                        col_potencial=None):
     """
     Retorna apenas os dados do último scan/ciclo do arquivo.
 
     - Se col_scan for informada (ou detectada automaticamente), filtra pelas
       linhas cujo valor nessa coluna é o maior (último ciclo).
-    - Caso não exista coluna de scan, assume que o arquivo contém
-      `n_scans_esperado` varreduras de tamanho igual, concatenadas
-      sequencialmente, e retorna apenas o último trecho.
+    - Caso não exista coluna de scan, identifica as inversões da direção do
+      potencial e usa o último ciclo completo entre três retornos consecutivos.
+    - A divisão em partes iguais é apenas o último recurso.
     """
     if col_scan is not None and col_scan in df.columns:
         serie = df[col_scan]
@@ -110,6 +113,60 @@ def extrair_ultimo_scan(df, col_scan=None, n_scans_esperado=3):
         return df_ultimo, info
 
     n = len(df)
+
+    if col_potencial is not None and col_potencial in df.columns:
+        potencial = pd.to_numeric(df[col_potencial], errors="coerce").to_numpy()
+        diferencas = np.diff(potencial)
+        escala = np.nanmax(potencial) - np.nanmin(potencial)
+        passos_finitos = np.abs(diferencas[np.isfinite(diferencas)])
+        passos_finitos = passos_finitos[passos_finitos > 0]
+        passo_tipico = float(np.median(passos_finitos)) if len(passos_finitos) else 0.0
+        tolerancia = max(float(escala) * 1e-9, 1e-12)
+        tolerancia_extremo = max(1.5 * passo_tipico, float(escala) * 0.005)
+        potencial_minimo = float(np.nanmin(potencial))
+        potencial_maximo = float(np.nanmax(potencial))
+
+        # Ignora passos nulos/repetidos e localiza mudanças reais de sentido.
+        indices_validos = np.flatnonzero(
+            np.isfinite(diferencas) & (np.abs(diferencas) > tolerancia)
+        )
+        retornos_tipados = []
+        if len(indices_validos) >= 2:
+            direcao_anterior = np.sign(diferencas[indices_validos[0]])
+            for indice_diferenca in indices_validos[1:]:
+                direcao_atual = np.sign(diferencas[indice_diferenca])
+                if direcao_atual != direcao_anterior:
+                    # diff[i] liga os pontos i e i+1; ao mudar o sinal, i é o
+                    # possível retorno. Só aceitamos retornos próximos de um
+                    # extremo global, descartando oscilações no meio do ramo.
+                    valor_retorno = potencial[indice_diferenca]
+                    tipo = None
+                    if abs(valor_retorno - potencial_maximo) <= tolerancia_extremo:
+                        tipo = "max"
+                    elif abs(valor_retorno - potencial_minimo) <= tolerancia_extremo:
+                        tipo = "min"
+
+                    if tipo is not None:
+                        retorno = (int(indice_diferenca), tipo)
+                        if retornos_tipados and retornos_tipados[-1][1] == tipo:
+                            # Vários pequenos retornos perto do mesmo vértice
+                            # representam um único extremo; fica o mais recente.
+                            retornos_tipados[-1] = retorno
+                        else:
+                            retornos_tipados.append(retorno)
+                    direcao_anterior = direcao_atual
+
+        retornos = [indice for indice, _ in retornos_tipados]
+        if len(retornos) >= 3:
+            inicio = retornos[-3]
+            fim = retornos[-1]
+            df_ultimo = df.iloc[inicio:fim + 1].reset_index(drop=True)
+            info = (
+                "Último scan identificado pelas inversões do potencial "
+                f"(linhas {inicio} a {fim})."
+            )
+            return df_ultimo, info
+
     n_scans_esperado = max(1, int(n_scans_esperado))
     tamanho = n // n_scans_esperado
     if tamanho == 0:
@@ -131,7 +188,9 @@ def calcular_potencial_extracao(x):
         (ponto_mais_alto - ponto_mais_baixo) / 2 + ponto_mais_baixo
     """
     x = np.asarray(x, dtype=float)
-    x = x[~np.isnan(x)]
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return np.nan, np.nan, np.nan
     ponto_mais_alto = np.max(x)
     ponto_mais_baixo = np.min(x)
     potencial = (ponto_mais_alto - ponto_mais_baixo) / 2.0 + ponto_mais_baixo
@@ -145,50 +204,78 @@ def interpolar_ia_ic(x, y, target_x):
     Quando há um ponto medido exatamente no potencial alvo, usa sua corrente.
     Caso contrário, calcula a corrente por interpolação linear entre os dois
     pontos consecutivos que envolvem o alvo, em cada passagem do voltamograma.
-    A maior corrente encontrada é Ia e a menor é Ic. Essa classificação não
-    depende do sinal da corrente e funciona também para voltamogramas deslocados.
+    São consideradas as duas passagens da curva pelo potencial central. Entre
+    as duas correntes obtidas nesse mesmo potencial, a maior é a anódica (Ia) e
+    a menor é a catódica (Ic). Pontos medidos têm prioridade; a interpolação é
+    usada apenas quando o potencial central não foi medido em uma passagem.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
-    correntes = []
+    if len(x) != len(y) or not np.isfinite(target_x):
+        return np.nan, np.nan
 
+    exatas = []
+    interpoladas = []
+
+    # Primeiro procura amostras realmente medidas no potencial central.
+    for indice, (potencial, corrente) in enumerate(zip(x, y)):
+        if not np.all(np.isfinite([potencial, corrente])):
+            continue
+        if np.isclose(potencial, target_x, rtol=0.0, atol=1e-12):
+            exatas.append((indice, float(corrente)))
+
+    # Em seguida calcula as alternativas interpoladas, uma para cada passagem.
     for j in range(len(x) - 1):
         xa, xb = x[j], x[j + 1]
         ya, yb = y[j], y[j + 1]
         if not np.all(np.isfinite([xa, xb, ya, yb])):
             continue
 
-        # Usa diretamente o valor experimental quando o alvo coincide com o
-        # primeiro ponto do intervalo. O último ponto é alcançado na iteração
-        # seguinte, evitando duplicar a mesma corrente.
-        if np.isclose(xa, target_x, rtol=0.0, atol=1e-12):
-            correntes.append(float(ya))
-            continue
-
-        # Se o alvo estiver estritamente entre os pontos, interpola a corrente.
+        # Extremos estritos impedem que um ponto exato também seja interpolado.
         if min(xa, xb) < target_x < max(xa, xb) and not np.isclose(xa, xb):
             fracao = (target_x - xa) / (xb - xa)
-            correntes.append(float(ya + fracao * (yb - ya)))
+            interpoladas.append((j + fracao, float(ya + fracao * (yb - ya))))
 
-    # Inclui o último ponto, caso ele coincida exatamente com o alvo.
-    if len(x) and np.isfinite(x[-1]) and np.isfinite(y[-1]):
-        if np.isclose(x[-1], target_x, rtol=0.0, atol=1e-12):
-            correntes.append(float(y[-1]))
+    # Alguns equipamentos encerram o ciclo uma fração de passo antes do
+    # potencial inicial. Se apenas uma passagem envolveu estritamente o centro,
+    # completa a outra pela reta dos dois últimos pontos (ou, como alternativa,
+    # dos dois primeiros), limitada a no máximo dois passos de potencial.
+    if len(exatas) + len(interpoladas) < 2 and len(x) >= 2:
+        intervalos_borda = [(len(x) - 2, len(x) - 1), (0, 1)]
+        for ia_borda, ib_borda in intervalos_borda:
+            xa, xb = x[ia_borda], x[ib_borda]
+            ya, yb = y[ia_borda], y[ib_borda]
+            if not np.all(np.isfinite([xa, xb, ya, yb])) or np.isclose(xa, xb):
+                continue
+            distancia = min(abs(target_x - xa), abs(target_x - xb))
+            if distancia <= 2.0 * abs(xb - xa):
+                fracao = (target_x - xa) / (xb - xa)
+                corrente = float(ya + fracao * (yb - ya))
+                interpoladas.append((ia_borda + fracao, corrente))
+                break
 
-    if not correntes:
+    # Cada item representa uma passagem da curva pelo potencial central. Se há
+    # dois pontos experimentais, nenhuma interpolação é necessária. Havendo só
+    # um, completa-se a segunda passagem com o cruzamento interpolado.
+    if len(exatas) >= 2:
+        correntes = [corrente for _, corrente in exatas[-2:]]
+    elif len(exatas) == 1:
+        indice_exato, corrente_exata = exatas[0]
+        alternativas = [
+            (posicao, corrente)
+            for posicao, corrente in interpoladas
+            if abs(posicao - indice_exato) > 1.0
+        ]
+        correntes = [corrente_exata]
+        if alternativas:
+            correntes.append(alternativas[-1][1])
+    else:
+        correntes = [corrente for _, corrente in interpoladas[-2:]]
+
+    if len(correntes) < 2:
         return np.nan, np.nan
 
-    # Remove duplicatas numéricas que podem surgir junto aos pontos de retorno.
-    correntes_unicas = []
-    for corrente in correntes:
-        if not any(np.isclose(corrente, existente, rtol=1e-9, atol=1e-12)
-                   for existente in correntes_unicas):
-            correntes_unicas.append(corrente)
-
-    if len(correntes_unicas) == 1:
-        return correntes_unicas[0], np.nan
-
-    return float(max(correntes_unicas)), float(min(correntes_unicas))
+    return float(max(correntes)), float(min(correntes))
 
 
 def regressao_pearson(x, y):
@@ -365,7 +452,7 @@ with st.sidebar:
     )
 
     # processa todos os arquivos com a configuração única
-    for arq in arquivos:
+    for indice_arquivo, arq in enumerate(arquivos):
         try:
             df_completo = ler_arquivo(arq)
         except Exception as e:
@@ -380,24 +467,38 @@ with st.sidebar:
         elif col_scan_auto is not None:
             col_scan_usar = col_scan_auto
 
-        df_ultimo, _ = extrair_ultimo_scan(df_completo, col_scan_usar, n_scans_global)
+        df_ultimo, info_scan = extrair_ultimo_scan(
+            df_completo,
+            col_scan_usar,
+            n_scans_global,
+            col_potencial=col_e_global,
+        )
 
-        # potencial de extração
+        # Centro e correntes são determinados somente no último scan deste
+        # arquivo, agora delimitado pelos pontos de retorno do potencial.
+        x_tab = np.array([], dtype=float)
+        y_tab = np.array([], dtype=float)
+        pot_extracao = np.nan
+        pot_central_calculado = np.nan
+        pot_alto = np.nan
+        pot_baixo = np.nan
         try:
             x_tab = df_ultimo[col_e_global].astype(float).to_numpy()
-            pot_extracao, pot_alto, pot_baixo = calcular_potencial_extracao(x_tab)
+            y_tab = df_ultimo[col_i_global].astype(float).to_numpy() * 1000.0
+
+            x_analise = x_tab
+            y_analise = y_tab
+            pot_central_calculado, pot_alto, pot_baixo = calcular_potencial_extracao(
+                x_analise
+            )
+            pot_extracao = pot_central_calculado
         except Exception:
-            pot_extracao = None
+            pass
 
         # Ia, Ic e média
         try:
-            i_raw_tab = df_ultimo[col_i_global].astype(float).to_numpy()
-            y_tab = i_raw_tab * 1000.0
-
-            ia_tab, ic_tab = (
-                interpolar_ia_ic(x_tab, y_tab, pot_extracao)
-                if pot_extracao is not None
-                else (np.nan, np.nan)
+            ia_tab, ic_tab = interpolar_ia_ic(
+                x_analise, y_analise, pot_extracao
             )
 
             i_media_tab = np.nanmean(
@@ -406,17 +507,28 @@ with st.sidebar:
                     abs(ic_tab) if not np.isnan(ic_tab) else np.nan,
                 ]
             )
+
         except Exception:
             ia_tab, ic_tab, i_media_tab = np.nan, np.nan, np.nan
 
         configs.append(
             {
                 "nome": arq.name,
+                "id_arquivo": f"{arq.name}_{arq.size}_{indice_arquivo}",
                 "df": df_ultimo,
                 "col_e": col_e_global,
                 "col_i": col_i_global,
                 "vel": np.nan,
                 "pot_extracao": pot_extracao,
+                "pot_central_calculado": pot_central_calculado,
+                "pot_maximo": pot_alto,
+                "pot_minimo": pot_baixo,
+                "info_scan": info_scan,
+                "x": x_tab,
+                "y_mA": y_tab,
+                "ia": ia_tab,
+                "ic": ic_tab,
+                "i_media": i_media_tab,
             }
         )
 
@@ -432,14 +544,14 @@ st.write(
 
 with st.form("form_velocidades"):
     velocidades_informadas = []
-    for indice, cfg in enumerate(configs):
+    for cfg in configs:
         velocidade = st.number_input(
             f"{cfg['nome']} — velocidade de varredura (mV/s)",
             min_value=0.0,
             value=None,
             step=1.0,
             format="%.6g",
-            key=f"velocidade_varredura_{indice}",
+            key=f"velocidade_varredura_{cfg['id_arquivo']}",
             placeholder="Obrigatório",
         )
         velocidades_informadas.append(velocidade)
@@ -492,17 +604,18 @@ if True:  # cálculo automático a cada alteração dos arquivos ou parâmetros
     curvas = []
 
     for cfg in configs:
-        if not np.isfinite(cfg["vel"]) or cfg["vel"] <= 0 or cfg["pot_extracao"] is None:
+        if (not np.isfinite(cfg["vel"]) or cfg["vel"] <= 0
+                or not np.isfinite(cfg["pot_extracao"])):
             continue
 
-        df = cfg["df"]
-        x = df[cfg["col_e"]].astype(float).to_numpy()
-
-        i_raw_A = df[cfg["col_i"]].astype(float).to_numpy()
-        y_mA = i_raw_A * 1000.0
-
+        # O potencial e as duas correntes já foram determinados isoladamente
+        # durante o processamento do arquivo. Esta etapa apenas reúne os
+        # resultados individuais para tabelas, regressões e gráficos.
+        x = cfg["x"]
+        y_mA = cfg["y_mA"]
         target_x = cfg["pot_extracao"]
-        ia, ic = interpolar_ia_ic(x, y_mA, target_x)
+        ia = cfg["ia"]
+        ic = cfg["ic"]
 
         curvas.append(
             {
@@ -516,10 +629,7 @@ if True:  # cálculo automático a cada alteração dos arquivos ou parâmetros
             }
         )
 
-        i_media = np.nanmean([
-            abs(ia) if not np.isnan(ia) else np.nan,
-            abs(ic) if not np.isnan(ic) else np.nan,
-        ])
+        i_media = cfg["i_media"]
 
         resultados.append(
             {
@@ -615,14 +725,10 @@ with tab_graficos:
         cv_titulo = editor_cv.text_input("Título", "Overlaid voltammograms", key="cv_titulo_en")
         cv_eixo_x = editor_cv.text_input("Eixo X", "Potential (V)", key="cv_eixo_x_en")
         cv_eixo_y = editor_cv.text_input("Eixo Y", "Current (mA)", key="cv_eixo_y_en")
-        labels_curvas = [
-            editor_cv.text_input(
-                f"Legenda da curva {idx + 1}",
-                f"{curva['vel']:.0f} mV/s",
-                key=f"label_curva_en_{idx}",
-            )
-            for idx, curva in enumerate(curvas)
-        ]
+        # A legenda vem diretamente da velocidade confirmada para cada arquivo.
+        # Não usamos estado editável aqui, pois ele mantinha textos antigos após
+        # uma alteração de velocidade ou da ordem dos uploads.
+        labels_curvas = [f"{curva['vel']:.6g} mV/s" for curva in curvas]
         posicao_legenda_cv = editor_cv.selectbox(
             "Posição da legenda",
             list(POSICOES_LEGENDA.keys()),
@@ -955,8 +1061,8 @@ with tab_resultados:
             columns={
                 "arquivo": "Arquivo",
                 "scan_rate_mV_s": "Velocidade de varredura (mV/s)",
-                "Ia_mA": "Ia (mA)",
-                "Ic_mA": "Ic (mA)",
+                "Ia_mA": "Corrente anódica, Ia (mA)",
+                "Ic_mA": "Corrente catódica, Ic (mA)",
             }
         )
 
