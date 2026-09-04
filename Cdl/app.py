@@ -9,6 +9,7 @@ Como rodar:
 """
 
 import io
+import hashlib
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -376,6 +377,7 @@ POSICOES_LEGENDA = {
 # ----------------------------------------------------------------------------
 
 st.title("⚡ Cálculo de Capacitância de Dupla Camada (Cdl / ECSA)")
+st.caption("Versão do cálculo: 2026-09-04.2 — resultados sem cache de correntes")
 
 # ============================================================================
 # TELA INICIAL: carregamento dos arquivos
@@ -394,6 +396,14 @@ if not arquivos:
     st.info("👆 Envie os arquivos acima para liberar as etapas de análise.")
     st.stop()
 
+st.caption(
+    "Arquivos recebidos nesta execução: "
+    + " | ".join(
+        f"{arq.name}: {arq.size} bytes, ID {hashlib.sha256(arq.getvalue()).hexdigest()[:8]}"
+        for arq in arquivos
+    )
+)
+
 # ============================================================================
 # PROCESSAMENTO DOS ARQUIVOS
 # ============================================================================
@@ -409,23 +419,12 @@ with st.sidebar:
     try:
         primeiro_df = ler_arquivo(arquivos[0])
         colunas_ref = list(primeiro_df.columns)
+        col_e_detectada, col_i_detectada = detectar_colunas(primeiro_df)
     except Exception:
         colunas_ref = []
+        col_e_detectada, col_i_detectada = None, None
 
-    st.markdown("Escolha as colunas e parâmetros aplicáveis para todos os arquivos:")
-
-    col_e_global = st.selectbox(
-        "Coluna de Potencial (E)",
-        colunas_ref,
-        index=0 if colunas_ref else None,
-        key="col_e_global",
-    )
-    col_i_global = st.selectbox(
-        "Coluna de Corrente (I)",
-        colunas_ref,
-        index=min(1, max(0, len(colunas_ref) - 1)) if colunas_ref else None,
-        key="col_i_global",
-    )
+    st.markdown("As colunas de potencial e corrente são detectadas em cada arquivo.")
 
     escolha_scan_global = st.selectbox(
         "Coluna que identifica o scan/ciclo (ou Automático)",
@@ -459,6 +458,14 @@ with st.sidebar:
             st.error(f"{arq.name}: {e}")
             continue
 
+        col_e_arquivo, col_i_arquivo = detectar_colunas(df_completo)
+        if col_e_arquivo is None or col_i_arquivo is None:
+            st.error(
+                f"{arq.name}: não foi possível identificar as colunas "
+                "WE(1).Potential e WE(1).Current."
+            )
+            continue
+
         # determina coluna de scan a usar
         col_scan_auto = detectar_coluna_scan(df_completo)
         col_scan_usar = None
@@ -471,7 +478,7 @@ with st.sidebar:
             df_completo,
             col_scan_usar,
             n_scans_global,
-            col_potencial=col_e_global,
+            col_potencial=col_e_arquivo,
         )
 
         # Centro e correntes são determinados somente no último scan deste
@@ -483,8 +490,8 @@ with st.sidebar:
         pot_alto = np.nan
         pot_baixo = np.nan
         try:
-            x_tab = df_ultimo[col_e_global].astype(float).to_numpy()
-            y_tab = df_ultimo[col_i_global].astype(float).to_numpy() * 1000.0
+            x_tab = df_ultimo[col_e_arquivo].astype(float).to_numpy()
+            y_tab = df_ultimo[col_i_arquivo].astype(float).to_numpy() * 1000.0
 
             x_analise = x_tab
             y_analise = y_tab
@@ -516,8 +523,8 @@ with st.sidebar:
                 "nome": arq.name,
                 "id_arquivo": f"{arq.name}_{arq.size}_{indice_arquivo}",
                 "df": df_ultimo,
-                "col_e": col_e_global,
-                "col_i": col_i_global,
+                "col_e": col_e_arquivo,
+                "col_i": col_i_arquivo,
                 "vel": np.nan,
                 "pot_extracao": pot_extracao,
                 "pot_central_calculado": pot_central_calculado,
@@ -600,6 +607,7 @@ tab_resultados, tab_graficos = st.tabs(
 
 if True:  # cálculo automático a cada alteração dos arquivos ou parâmetros
 
+    calculado = False
     resultados = []
     curvas = []
 
@@ -646,7 +654,7 @@ if True:  # cálculo automático a cada alteração dos arquivos ou parâmetros
         st.warning(
             "São necessários pelo menos 2 arquivos com scan rate > 0 para a regressão linear."
         )
-        st.session_state["calculado"] = False
+        calculado = False
     else:
         df_res = pd.DataFrame(resultados).sort_values("scan_rate_V_s").reset_index(drop=True)
 
@@ -670,13 +678,7 @@ if True:  # cálculo automático a cada alteração dos arquivos ou parâmetros
             np.nanmean([c["pot_extracao"] for c in curvas if c.get("pot_extracao") is not None])
         )
 
-        st.session_state["curvas"] = curvas
-        st.session_state["df_res"] = df_res
-        st.session_state["x_v"] = x_v
-        st.session_state["y_ia"] = y_ia
-        st.session_state["y_ic"] = y_ic
-        st.session_state["y_media"] = y_media
-        st.session_state["regressao"] = dict(
+        reg = dict(
             int_a=int_a,
             slope_a=slope_a,
             r_a=r_a,
@@ -690,8 +692,7 @@ if True:  # cálculo automático a cada alteração dos arquivos ou parâmetros
             r_m=r_m,
             r2_m=r2_m,
         )
-        st.session_state["pot_medio_geral"] = pot_medio_geral
-        st.session_state["calculado"] = True
+        calculado = True
 
 
 # ============================================================================
@@ -700,18 +701,9 @@ if True:  # cálculo automático a cada alteração dos arquivos ou parâmetros
 
 with tab_graficos:
 
-    if not st.session_state.get("calculado"):
+    if not calculado:
         st.info("Adicione ao menos dois arquivos válidos para gerar os gráficos automaticamente.")
     else:
-        curvas = st.session_state["curvas"]
-        df_res = st.session_state["df_res"]
-        x_v = st.session_state["x_v"]
-        y_ia = st.session_state["y_ia"]
-        y_ic = st.session_state["y_ic"]
-        y_media = st.session_state["y_media"]
-        reg = st.session_state["regressao"]
-        pot_medio_geral = st.session_state["pot_medio_geral"]
-
         int_a, slope_a, r_a, r2_a = (
             reg["int_a"], reg["slope_a"], reg["r_a"], reg["r2_a"]
         )
@@ -1042,13 +1034,9 @@ with tab_graficos:
 
 with tab_resultados:
 
-    if not st.session_state.get("calculado"):
+    if not calculado:
         st.info("Adicione ao menos dois arquivos válidos para gerar os resultados automaticamente.")
     else:
-        curvas = st.session_state["curvas"]
-        df_res = st.session_state["df_res"]
-        reg = st.session_state["regressao"]
-
         slope_a, r2_a = reg["slope_a"], reg["r2_a"]
         slope_c, r2_c = reg["slope_c"], reg["r2_c"]
 
