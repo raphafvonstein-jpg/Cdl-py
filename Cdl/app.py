@@ -180,6 +180,51 @@ def extrair_ultimo_scan(df, col_scan=None, n_scans_esperado=3,
     return df_ultimo, info
 
 
+def extrair_scan_selecionado(df, numero_scan, col_scan=None,
+                            n_scans_estimado=3):
+    """Seleciona o ciclo numerado, sem trocar silenciosamente para outro ciclo."""
+    numero_scan = int(numero_scan)
+    if col_scan is not None and col_scan in df.columns:
+        serie = df[col_scan]
+        valores = pd.to_numeric(serie, errors="coerce")
+        if valores.notna().any():
+            scans = sorted(valores.dropna().unique())
+            if 1 <= numero_scan <= len(scans):
+                valor_scan = scans[numero_scan - 1]
+                selecionado = df[valores == valor_scan].reset_index(drop=True)
+                return selecionado, (
+                    f"Ciclo {numero_scan} selecionado pela coluna '{col_scan}' "
+                    f"(valor = {valor_scan})."
+                )
+            return df.iloc[0:0].copy(), (
+                f"Ciclo {numero_scan} não existe na coluna '{col_scan}' "
+                f"({len(scans)} ciclos encontrados)."
+            )
+
+        scans = list(pd.unique(serie.dropna()))
+        if 1 <= numero_scan <= len(scans):
+            valor_scan = scans[numero_scan - 1]
+            selecionado = df[serie == valor_scan].reset_index(drop=True)
+            return selecionado, (
+                f"Ciclo {numero_scan} selecionado pela coluna '{col_scan}' "
+                f"(valor = {valor_scan})."
+            )
+        return df.iloc[0:0].copy(), f"Ciclo {numero_scan} não encontrado."
+
+    # Sem coluna Scan, conserva a estimativa já usada para arquivos exportados
+    # como três ciclos concatenados. O número informado escolhe o bloco, e não
+    # altera o número total de blocos.
+    total = max(1, int(n_scans_estimado))
+    if not 1 <= numero_scan <= total:
+        return df.iloc[0:0].copy(), f"Ciclo {numero_scan} não encontrado."
+    inicio = (len(df) * (numero_scan - 1)) // total
+    fim = (len(df) * numero_scan) // total
+    return df.iloc[inicio:fim].reset_index(drop=True), (
+        f"Ciclo {numero_scan} selecionado entre {total} partes estimadas "
+        f"(linhas {inicio} a {fim - 1})."
+    )
+
+
 
 
 def calcular_potencial_extracao(x):
@@ -350,7 +395,7 @@ def aplicar_limites_eixos(ax, limites):
 def imagem_grafico(fig, formato):
     """Retorna o gráfico em memória para download em PNG ou JPEG."""
     buffer = io.BytesIO()
-    fig.savefig(buffer, format=formato.lower(), dpi=300, bbox_inches="tight")
+    fig.savefig(buffer, format=formato.lower(), dpi=300, bbox_inches=None)
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -386,10 +431,28 @@ st.caption("Versão do cálculo: 2026-09-04.2 — resultados sem cache de corren
 st.header("📂 Carregar arquivos")
 st.write("Selecione os arquivos de voltametria — um arquivo para cada velocidade de varredura.")
 
+
+def limpar_arquivos_anexados():
+    """Recria o uploader vazio e descarta a análise da seleção anterior."""
+    st.session_state["geracao_upload"] = st.session_state.get("geracao_upload", 0) + 1
+    st.session_state.pop("velocidades_confirmadas_para", None)
+    st.session_state["calculado"] = False
+    for chave in list(st.session_state):
+        if chave.startswith("velocidade_varredura_"):
+            del st.session_state[chave]
+
+
 arquivos = st.file_uploader(
     "Arquivos de voltametria",
     type=["csv", "txt", "xlsx", "xls"],
     accept_multiple_files=True,
+    key=f"arquivos_voltametria_{st.session_state.get('geracao_upload', 0)}",
+)
+
+st.button(
+    "🗑️ Apagar todos os arquivos anexados",
+    on_click=limpar_arquivos_anexados,
+    disabled=not arquivos,
 )
 
 if not arquivos:
@@ -415,30 +478,28 @@ configs = []
 with st.sidebar:
     st.subheader("Configuração única das medidas")
 
-    # pega colunas do primeiro arquivo como referência
+    # Detecta a quantidade de ciclos do primeiro arquivo para limitar o controle.
     try:
         primeiro_df = ler_arquivo(arquivos[0])
-        colunas_ref = list(primeiro_df.columns)
-        col_e_detectada, col_i_detectada = detectar_colunas(primeiro_df)
+        col_scan_ref = detectar_coluna_scan(primeiro_df)
+        if col_scan_ref:
+            serie_ref = pd.to_numeric(primeiro_df[col_scan_ref], errors="coerce")
+            total_scans_ref = int(serie_ref.dropna().nunique()) if serie_ref.notna().any() else int(primeiro_df[col_scan_ref].dropna().nunique())
+        else:
+            total_scans_ref = 3
     except Exception:
-        colunas_ref = []
-        col_e_detectada, col_i_detectada = None, None
+        total_scans_ref = 3
 
     st.markdown("As colunas de potencial e corrente são detectadas em cada arquivo.")
 
-    escolha_scan_global = st.selectbox(
-        "Coluna que identifica o scan/ciclo (ou Automático)",
-        ["Automático"] + colunas_ref,
-        index=0,
-        key="scan_col_global",
-    )
-
-    n_scans_global = st.number_input(
-        "Nº de scans no arquivo (usado se não houver coluna)",
+    scan_selecionado = st.number_input(
+        "Scan/ciclo selecionado para o gráfico e os resultados",
         min_value=1,
-        value=3,
+        max_value=max(1, total_scans_ref),
+        value=max(1, total_scans_ref),
         step=1,
-        key="n_scans_global",
+        key="scan_selecionado_v1",
+        help="1 = primeiro ciclo; selecione outro número para atualizar curvas, Ia e Ic.",
     )
 
     capacitancia_especifica = st.number_input(
@@ -466,23 +527,19 @@ with st.sidebar:
             )
             continue
 
-        # determina coluna de scan a usar
-        col_scan_auto = detectar_coluna_scan(df_completo)
-        col_scan_usar = None
-        if escolha_scan_global != "Automático":
-            col_scan_usar = escolha_scan_global
-        elif col_scan_auto is not None:
-            col_scan_usar = col_scan_auto
-
-        df_ultimo, info_scan = extrair_ultimo_scan(
+        col_scan_usar = detectar_coluna_scan(df_completo)
+        df_ultimo, info_scan = extrair_scan_selecionado(
             df_completo,
-            col_scan_usar,
-            n_scans_global,
-            col_potencial=col_e_arquivo,
+            scan_selecionado,
+            col_scan=col_scan_usar,
+            n_scans_estimado=total_scans_ref,
         )
+        if df_ultimo.empty:
+            st.error(f"{arq.name}: {info_scan}")
+            continue
 
-        # Centro e correntes são determinados somente no último scan deste
-        # arquivo, agora delimitado pelos pontos de retorno do potencial.
+        # Centro e correntes são determinados somente no scan selecionado deste
+        # arquivo; o mesmo trecho é exibido no voltamograma.
         x_tab = np.array([], dtype=float)
         y_tab = np.array([], dtype=float)
         pot_extracao = np.nan
@@ -601,6 +658,37 @@ tab_resultados, tab_graficos = st.tabs(
     ["📊 Dados e resultados", "📈 Gráficos"]
 )
 
+assinatura_selecao = hashlib.sha256(
+    repr([(arq.name, arq.size, hashlib.sha256(arq.getvalue()).hexdigest())
+          for arq in arquivos]).encode("utf-8")
+).hexdigest()[:12]
+ids_excluidos = set()
+with tab_resultados:
+    st.subheader("Resultados")
+    st.caption(
+        "Cada caixa marcada inclui o arquivo na análise. Desmarque-a para retirar "
+        "o ponto; slope, R² e gráficos serão recalculados."
+    )
+    with st.container(border=True):
+        cabecalho = st.columns([1.5, 1.7, 1.4, 1.4])
+        for coluna, titulo in zip(cabecalho, [
+            "Arquivo", "Velocidade de varredura (mV/s)",
+            "Corrente anódica, Ia (mA)", "Corrente catódica, Ic (mA)",
+        ]):
+            coluna.markdown(f"**{titulo}**")
+        for cfg in configs:
+            linha = st.columns([1.5, 1.7, 1.4, 1.4], vertical_alignment="center")
+            incluir = linha[0].checkbox(
+                cfg["nome"],
+                value=True,
+                key=f"incluir_ponto_{assinatura_selecao}_{cfg['id_arquivo']}",
+            )
+            linha[1].write(fmt_livre(cfg["vel"]))
+            linha[2].write(fmt_livre(cfg["ia"]))
+            linha[3].write(fmt_livre(cfg["ic"]))
+            if not incluir:
+                ids_excluidos.add(cfg["id_arquivo"])
+
 # ============================================================================
 # CÁLCULO
 # ============================================================================
@@ -612,6 +700,8 @@ if True:  # cálculo automático a cada alteração dos arquivos ou parâmetros
     curvas = []
 
     for cfg in configs:
+        if cfg["id_arquivo"] in ids_excluidos:
+            continue
         if (not np.isfinite(cfg["vel"]) or cfg["vel"] <= 0
                 or not np.isfinite(cfg["pot_extracao"])):
             continue
@@ -652,10 +742,16 @@ if True:  # cálculo automático a cada alteração dos arquivos ou parâmetros
 
     if len(resultados) < 2:
         st.warning(
-            "São necessários pelo menos 2 arquivos com scan rate > 0 para a regressão linear."
+            "Mantenha pelo menos 2 arquivos com velocidade válida para calcular "
+            "a regressão linear."
         )
         calculado = False
     else:
+        if len(resultados) == 2:
+            st.info(
+                "Com apenas dois pontos, R² será 1 por definição; mantenha três "
+                "ou mais arquivos para avaliar a qualidade do ajuste."
+            )
         df_res = pd.DataFrame(resultados).sort_values("scan_rate_V_s").reset_index(drop=True)
 
         x_v = df_res["scan_rate_V_s"].to_numpy()
@@ -711,7 +807,7 @@ with tab_graficos:
             reg["int_c"], reg["slope_c"], reg["r_c"], reg["r2_c"]
         )
 
-        st.subheader("4.1 Voltammograms — last scan from each file")
+        st.subheader(f"4.1 Voltammograms — scan {scan_selecionado} from each file")
         graf_cv, op_cv = st.columns([1.6, 1.0], vertical_alignment="top")
         editor_cv = op_cv.popover("✏️ Editar gráfico 4.1", use_container_width=True)
         cv_titulo = editor_cv.text_input("Título", "Overlaid voltammograms", key="cv_titulo_en")
@@ -780,6 +876,10 @@ with tab_graficos:
             key="mostrar_linha_potencial",
         )
         limites_cv = controles_limites_eixos(editor_cv, "cv", x_cv_todos, y_cv_todos)
+        espessura_cv = editor_cv.number_input(
+            "Espessura das linhas (pt)", min_value=0.5, max_value=6.0,
+            value=1.5, step=0.25, key="espessura_cv",
+        )
         formato_cv = op_cv.selectbox("Formato da imagem", ["PNG", "JPEG"], key="formato_cv")
 
         fig_cv, ax_cv = plt.subplots(figsize=(4.6, 3.1), dpi=180)
@@ -789,7 +889,7 @@ with tab_graficos:
                 curva["x"],
                 curva["y"],
                 color=cor,
-                linewidth=1.5,
+                linewidth=espessura_cv,
                 label=label_curva,
             )
 
@@ -801,7 +901,7 @@ with tab_graficos:
                 float(np.max(y_cv_finitos)),
                 color="black",
                 linestyle="--",
-                linewidth=1,
+                linewidth=espessura_cv,
             )
         ax_cv.set_xlabel(cv_eixo_x)
         ax_cv.set_ylabel(cv_eixo_y)
@@ -815,8 +915,8 @@ with tab_graficos:
             ncol=min(3, max(1, len(curvas))),
             frameon=False,
         )
-        fig_cv.tight_layout()
-        graf_cv.pyplot(fig_cv, width="content", dpi=300)
+        fig_cv.subplots_adjust(left=0.18, right=0.96, bottom=0.18, top=0.85)
+        graf_cv.pyplot(fig_cv, width="content", dpi=300, bbox_inches=None)
         op_cv.download_button(
             f"Baixar gráfico 4.1 ({formato_cv})",
             data=imagem_grafico(fig_cv, formato_cv),
@@ -843,6 +943,10 @@ with tab_graficos:
         x_mV = x_v * 1000.0
         xx_mV = np.linspace(min(x_mV), max(x_mV), 50)
         limites_ia = controles_limites_eixos(editor_ia, "ia", x_mV, y_ia)
+        espessura_ia = editor_ia.number_input(
+            "Espessura da linha (pt)", min_value=0.5, max_value=6.0,
+            value=1.5, step=0.25, key="espessura_ia",
+        )
         formato_ia = op_ia.selectbox("Formato da imagem", ["PNG", "JPEG"], key="formato_ia")
         fig_ia, ax_ia = plt.subplots(figsize=(4.4, 2.9), dpi=180)
         ax_ia.scatter(x_mV, y_ia, color=cor_ia, label=legenda_ia)
@@ -851,6 +955,7 @@ with tab_graficos:
             slope_a * (xx_mV / 1000.0) + int_a,
             color=cor_ia,
             linestyle="--",
+            linewidth=espessura_ia,
             label="Linear fit",
         )
         ax_ia.set_xlabel(ia_eixo_x)
@@ -862,8 +967,8 @@ with tab_graficos:
         aplicar_limites_eixos(ax_ia, limites_ia)
         ax_ia.text(0.03, 0.96, texto_ia, transform=ax_ia.transAxes, fontsize=8, va="top")
         ax_ia.legend(loc=POSICOES_LEGENDA[posicao_legenda_ia], fontsize=8, frameon=False)
-        fig_ia.tight_layout()
-        graf_ia.pyplot(fig_ia, width="content", dpi=300)
+        fig_ia.subplots_adjust(left=0.18, right=0.96, bottom=0.18, top=0.85)
+        graf_ia.pyplot(fig_ia, width="content", dpi=300, bbox_inches=None)
         op_ia.download_button(
             f"Baixar gráfico 4.2 ({formato_ia})",
             data=imagem_grafico(fig_ia, formato_ia),
@@ -888,6 +993,10 @@ with tab_graficos:
         )
         cor_ic = editor_ic.color_picker("Cor da curva", "#1f77b4", key="cor_ic")
         limites_ic = controles_limites_eixos(editor_ic, "ic", x_mV, y_ic)
+        espessura_ic = editor_ic.number_input(
+            "Espessura da linha (pt)", min_value=0.5, max_value=6.0,
+            value=1.5, step=0.25, key="espessura_ic",
+        )
         formato_ic = op_ic.selectbox("Formato da imagem", ["PNG", "JPEG"], key="formato_ic")
         fig_ic, ax_ic = plt.subplots(figsize=(4.4, 2.9), dpi=180)
         ax_ic.scatter(x_mV, y_ic, color=cor_ic, label=legenda_ic)
@@ -896,6 +1005,7 @@ with tab_graficos:
             slope_c * (xx_mV / 1000.0) + int_c,
             color=cor_ic,
             linestyle="--",
+            linewidth=espessura_ic,
             label="Linear fit",
         )
         ax_ic.set_xlabel(ic_eixo_x)
@@ -907,8 +1017,8 @@ with tab_graficos:
         aplicar_limites_eixos(ax_ic, limites_ic)
         ax_ic.text(0.03, 0.96, texto_ic, transform=ax_ic.transAxes, fontsize=8, va="top")
         ax_ic.legend(loc=POSICOES_LEGENDA[posicao_legenda_ic], fontsize=8, frameon=False)
-        fig_ic.tight_layout()
-        graf_ic.pyplot(fig_ic, width="content", dpi=300)
+        fig_ic.subplots_adjust(left=0.18, right=0.96, bottom=0.18, top=0.85)
+        graf_ic.pyplot(fig_ic, width="content", dpi=300, bbox_inches=None)
         op_ic.download_button(
             f"Baixar gráfico 4.3 ({formato_ic})",
             data=imagem_grafico(fig_ic, formato_ic),
@@ -944,6 +1054,10 @@ with tab_graficos:
             np.concatenate([x_mV, x_mV]),
             np.concatenate([y_ia, y_ic]),
         )
+        espessura_comb = editor_comb.number_input(
+            "Espessura das linhas (pt)", min_value=0.5, max_value=6.0,
+            value=1.5, step=0.25, key="espessura_comb",
+        )
         formato_comb = op_comb.selectbox("Formato da imagem", ["PNG", "JPEG"], key="formato_comb")
         fig_comb, ax_comb = plt.subplots(figsize=(4.4, 2.9), dpi=180)
         ax_comb.scatter(x_mV, y_ia, color=cor_comb_ia, label=legenda_comb_ia)
@@ -952,6 +1066,7 @@ with tab_graficos:
             slope_a * (xx_mV / 1000.0) + int_a,
             color=cor_comb_ia,
             linestyle="--",
+            linewidth=espessura_comb,
             label="Linear fit Ia",
         )
         ax_comb.scatter(x_mV, y_ic, color=cor_comb_ic, label=legenda_comb_ic)
@@ -960,6 +1075,7 @@ with tab_graficos:
             slope_c * (xx_mV / 1000.0) + int_c,
             color=cor_comb_ic,
             linestyle="--",
+            linewidth=espessura_comb,
             label="Linear fit Ic",
         )
         ax_comb.set_xlabel(comb_eixo_x)
@@ -1018,8 +1134,8 @@ with tab_graficos:
                 loc=POSICOES_LEGENDA[posicao_legenda_comb],
                 **opcoes_legenda_comb,
             )
-        fig_comb.tight_layout()
-        graf_comb.pyplot(fig_comb, width="content", dpi=300)
+        fig_comb.subplots_adjust(left=0.18, right=0.96, bottom=0.18, top=0.85)
+        graf_comb.pyplot(fig_comb, width="content", dpi=300, bbox_inches=None)
         op_comb.download_button(
             f"Baixar gráfico 4.4 ({formato_comb})",
             data=imagem_grafico(fig_comb, formato_comb),
@@ -1039,8 +1155,6 @@ with tab_resultados:
     else:
         slope_a, r2_a = reg["slope_a"], reg["r2_a"]
         slope_c, r2_c = reg["slope_c"], reg["r2_c"]
-
-        st.subheader("Resultados")
 
         df_res_exibicao = df_res.drop(
             columns=["scan_rate_V_s", "I_media_mA"],
@@ -1065,13 +1179,6 @@ with tab_resultados:
                     abs(slope_c) / capacitancia_especifica,
                 ],
             }
-        )
-
-        st.markdown("**Dados das medidas**")
-        st.dataframe(
-            df_res_exibicao,
-            use_container_width=True,
-            hide_index=True,
         )
 
         st.markdown("**Regressão linear e ECSA**")

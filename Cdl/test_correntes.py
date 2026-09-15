@@ -11,6 +11,7 @@ def carregar_funcoes():
         "calcular_potencial_extracao",
         "interpolar_ia_ic",
         "extrair_ultimo_scan",
+        "extrair_scan_selecionado",
         "detectar_coluna_scan",
     }
     modulo = ast.Module(
@@ -26,6 +27,7 @@ FUNCOES = carregar_funcoes()
 calcular_potencial_extracao = FUNCOES["calcular_potencial_extracao"]
 interpolar_ia_ic = FUNCOES["interpolar_ia_ic"]
 extrair_ultimo_scan = FUNCOES["extrair_ultimo_scan"]
+extrair_scan_selecionado = FUNCOES["extrair_scan_selecionado"]
 detectar_coluna_scan = FUNCOES["detectar_coluna_scan"]
 
 
@@ -108,3 +110,23 @@ def test_completa_passagem_quando_scan_termina_logo_antes_do_centro():
 
     assert np.isfinite(ia)
     assert np.isfinite(ic)
+
+
+def test_numero_seleciona_scan_identificado_na_coluna():
+    df = pd.DataFrame({"Scan": [1, 1, 2, 2, 3, 3], "E": [0, 1, 2, 3, 4, 5]})
+
+    segundo, _ = extrair_scan_selecionado(df, 2, col_scan="Scan")
+    terceiro, _ = extrair_scan_selecionado(df, 3, col_scan="Scan")
+
+    assert segundo["E"].tolist() == [2, 3]
+    assert terceiro["E"].tolist() == [4, 5]
+
+
+def test_numero_seleciona_bloco_quando_nao_ha_coluna_scan():
+    df = pd.DataFrame({"E": list(range(9))})
+
+    primeiro, _ = extrair_scan_selecionado(df, 1, n_scans_estimado=3)
+    segundo, _ = extrair_scan_selecionado(df, 2, n_scans_estimado=3)
+
+    assert primeiro["E"].tolist() == [0, 1, 2]
+    assert segundo["E"].tolist() == [3, 4, 5]
