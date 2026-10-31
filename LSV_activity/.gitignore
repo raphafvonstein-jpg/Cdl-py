@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.vscode/
+*.zip
+LSV/.validation/
+LSV/LSV-codigo-completo.txt
+LSV/
+.venv/
+venv/
+.cache/
+dist/
+.streamlit/secrets.toml

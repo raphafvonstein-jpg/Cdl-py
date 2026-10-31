@@ -1,0 +1,91 @@
+{
+  "format": "lsv-bancada",
+  "version": 9,
+  "samples": [
+    {
+      "id": 1,
+      "name": "Amostra A"
+    },
+    {
+      "id": 4,
+      "name": "Amostra B"
+    }
+  ],
+  "curves": [
+    {
+      "id": 2,
+      "name": "LSV_0_1.txt",
+      "text": "Potential/V\tCurrent/A\n1.5\t0.01\n1.7\t0.05\n1.9\t0.1\n2.0\t0.12",
+      "sample": "Amostra A",
+      "sampleId": 1,
+      "rep": 1,
+      "x": 0,
+      "y": 1,
+      "area": 1.0,
+      "electroArea": 2.0,
+      "rs": 0.0,
+      "eisId": null
+    },
+    {
+      "id": 3,
+      "name": "LSV_0_3.txt",
+      "text": "Potential/V\tCurrent/A\n1.52\t0.01\n1.72\t0.05\n1.92\t0.1\n2.02\t0.12",
+      "sample": "Amostra A",
+      "sampleId": 1,
+      "rep": 3,
+      "x": 0,
+      "y": 1,
+      "area": 1.0,
+      "electroArea": 2.0,
+      "rs": 0.0,
+      "eisId": null
+    },
+    {
+      "id": 5,
+      "name": "LSV_1_1.txt",
+      "text": "Potential/V\tCurrent/A\n1.4\t0.01\n1.5999999999999999\t0.05\n1.7999999999999998\t0.1\n1.9\t0.12",
+      "sample": "Amostra B",
+      "sampleId": 4,
+      "rep": 1,
+      "x": 0,
+      "y": 1,
+      "area": 1.0,
+      "electroArea": 2.0,
+      "rs": 0.0,
+      "eisId": null
+    },
+    {
+      "id": 6,
+      "name": "LSV_1_3.txt",
+      "text": "Potential/V\tCurrent/A\n1.42\t0.01\n1.6199999999999999\t0.05\n1.8199999999999998\t0.1\n1.92\t0.12",
+      "sample": "Amostra B",
+      "sampleId": 4,
+      "rep": 3,
+      "x": 0,
+      "y": 1,
+      "area": 1.0,
+      "electroArea": 2.0,
+      "rs": 0.0,
+      "eisId": null
+    }
+  ],
+  "impedances": [],
+  "settings": {
+    "referenceElectrode": "RHE",
+    "referenceElectrolyte": "",
+    "rheMode": "already",
+    "ph": "",
+    "refPotential": "",
+    "temperature": "25",
+    "eq": "1.23",
+    "xAxis": "5",
+    "yAxis": "8",
+    "mode": "mean",
+    "chartKind": "curves"
+  },
+  "barTargets": [
+    10,
+    50,
+    100
+  ]
+}

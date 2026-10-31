@@ -1,0 +1,41 @@
+﻿FORMULAS RECUPERADAS DO PROJETO ORIGIN
+
+Fonte: LSV, Tafel TiO2 25 a 75%.opju
+
+Expressoes existentes no arquivo, para Set Column Values da coluna de destino.
+Selecione uma coluna de destino diferente das colunas usadas na expressao.
+Os nomes das colunas de origem devem coincidir com os da planilha original.
+F em Col(F"Standard Deviation") identifica especificamente a coluna F.
+
+Esta extracao e parcial: nao inclui correcao de potencial nem ajuste de Tafel.
+Os grupos abaixo seguem os valores de Cdl presentes nas proprias formulas.
+
+25%
+Corrente:
+Col("Current Density (mA/cm²)")*0.332
+Desvio da corrente:
+Col("Standard Deviation")*0.332
+Corrente normalizada pela ECSA:
+Col("Current")/(0.009594/0.000040)
+Desvio normalizado pela ECSA:
+Col(F"Standard Deviation")/(0.009594/0.000040)
+
+50%
+Corrente:
+Col("Current Density (mA/cm²)")*0.332
+Desvio da corrente:
+Col("Standard Deviation")*0.332
+Corrente normalizada pela ECSA:
+Col("Current")/(0.02776/0.000040)
+Desvio normalizado pela ECSA:
+Col(F"Standard Deviation")/(0.02776/0.000040)
+
+75%
+Corrente:
+Col("Current Density (mA/cm²)")*0.332
+Desvio da corrente:
+Col("Standard Deviation")*0.332
+Corrente normalizada pela ECSA:
+Col("Current")/(0.0252/0.000040)
+Desvio normalizado pela ECSA:
+Col(F"Standard Deviation")/(0.0252/0.000040)
